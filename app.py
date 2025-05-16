@@ -2,79 +2,103 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from keras.models import load_model
-import streamlit as st
 import matplotlib.pyplot as plt
-
-model=load_model("C:\\Users\\User\\OneDrive\\Documents\\Stock Price Prediction using ML\\Stock Predictions Model.keras")
-
-st.header('Stock Market Predictor')
-
-stock =st.text_input('Enter Stock Symnbol', 'GOOG')
-start = '2012-01-01'
-end = '2024-10-01'
-
-data = yf.download(stock, start ,end)
-
-st.subheader('Stock Data')
-st.write(data)
-
-data_train = pd.DataFrame(data.Close[0: int(len(data)*0.80)])
-data_test = pd.DataFrame(data.Close[int(len(data)*0.80): len(data)])
-
 from sklearn.preprocessing import MinMaxScaler
-scaler = MinMaxScaler(feature_range=(0,1))
+import gradio as gr
+import tempfile
+import os
 
-pas_100_days = data_train.tail(100)
-data_test = pd.concat([pas_100_days, data_test], ignore_index=True)
-data_test_scale = scaler.fit_transform(data_test)
+# Load model
+model = load_model("Stock Predictions Model.keras")
 
-st.subheader('Price vs MA50')
-ma_50_days = data.Close.rolling(50).mean()
-fig1 = plt.figure(figsize=(8,6))
-plt.plot(ma_50_days, 'r')
-plt.plot(data.Close, 'g')
-plt.show()
-st.pyplot(fig1)
+# Plot function helpers
+def plot_ma(data, ma_days, color, label):
+    return data.Close.rolling(ma_days).mean(), color, label
 
-st.subheader('Price vs MA50 vs MA100')
-ma_100_days = data.Close.rolling(100).mean()
-fig2 = plt.figure(figsize=(8,6))
-plt.plot(ma_50_days, 'r')
-plt.plot(ma_100_days, 'b')
-plt.plot(data.Close, 'g')
-plt.show()
-st.pyplot(fig2)
+def plot_figure(data, lines_info, title):
+    plt.figure(figsize=(8,6))
+    for line, color, label in lines_info:
+        plt.plot(line, color, label=label)
+    plt.plot(data.Close, 'g', label='Close Price')
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    tmpfile = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    plt.savefig(tmpfile.name)
+    plt.close()
+    return tmpfile.name
 
-st.subheader('Price vs MA100 vs MA200')
-ma_200_days = data.Close.rolling(200).mean()
-fig3 = plt.figure(figsize=(8,6))
-plt.plot(ma_100_days, 'r')
-plt.plot(ma_200_days, 'b')
-plt.plot(data.Close, 'g')
-plt.show()
-st.pyplot(fig3)
+# Main prediction function
+def stock_predictor(stock_symbol):
+    start = '2012-01-01'
+    end = '2024-10-01'
+    
+    data = yf.download(stock_symbol, start, end)
+    
+    if data.empty:
+        return "Invalid stock symbol or no data found", None, None, None, None
 
-x = []
-y = []
+    # Train-test split
+    data_train = pd.DataFrame(data.Close[0: int(len(data)*0.80)])
+    data_test = pd.DataFrame(data.Close[int(len(data)*0.80): len(data)])
 
-for i in range(100, data_test_scale.shape[0]):
-    x.append(data_test_scale[i-100:i])
-    y.append(data_test_scale[i,0])
+    # Scaling
+    scaler = MinMaxScaler(feature_range=(0,1))
+    pas_100_days = data_train.tail(100)
+    data_test_full = pd.concat([pas_100_days, data_test], ignore_index=True)
+    data_test_scale = scaler.fit_transform(data_test_full)
 
-x,y = np.array(x), np.array(y)
+    # Moving Averages
+    ma_50, _, _ = plot_ma(data, 50, 'r', 'MA50')
+    ma_100, _, _ = plot_ma(data, 100, 'b', 'MA100')
+    ma_200, _, _ = plot_ma(data, 200, 'y', 'MA200')
 
-predict = model.predict(x)
+    # Prepare test data
+    x, y = [], []
+    for i in range(100, data_test_scale.shape[0]):
+        x.append(data_test_scale[i-100:i])
+        y.append(data_test_scale[i,0])
+    x, y = np.array(x), np.array(y)
 
-scale = 1/scaler.scale_
+    # Predict
+    predictions = model.predict(x)
+    scale = 1 / scaler.scale_[0]
+    predictions = predictions * scale
+    y = y * scale
 
-predict = predict * scale
-y = y * scale
+    # Plots
+    ma50_fig = plot_figure(data, [(ma_50, 'r', 'MA50')], 'Price vs MA50')
+    ma100_fig = plot_figure(data, [(ma_50, 'r', 'MA50'), (ma_100, 'b', 'MA100')], 'Price vs MA50 vs MA100')
+    ma200_fig = plot_figure(data, [(ma_100, 'r', 'MA100'), (ma_200, 'b', 'MA200')], 'Price vs MA100 vs MA200')
 
-st.subheader('Original Price vs Predicted Price')
-fig4 = plt.figure(figsize=(8,6))
-plt.plot(predict, 'r', label='Original Price')
-plt.plot(y, 'g', label = 'Predicted Price')
-plt.xlabel('Time')
-plt.ylabel('Price')
-plt.show()
-st.pyplot(fig4)
+    # Prediction vs Original plot
+    plt.figure(figsize=(8,6))
+    plt.plot(predictions, 'r', label='Predicted Price')
+    plt.plot(y, 'g', label='Original Price')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.title("Original vs Predicted Price")
+    pred_plot_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    plt.savefig(pred_plot_file.name)
+    plt.close()
+
+    return "Data fetched and processed successfully!", ma50_fig, ma100_fig, ma200_fig, pred_plot_file.name
+
+# Gradio interface
+interface = gr.Interface(
+    fn=stock_predictor,
+    inputs=gr.Textbox(label="Enter Stock Symbol", placeholder="e.g. GOOG"),
+    outputs=[
+        gr.Textbox(label="Status"),
+        gr.Image(label="Price vs MA50"),
+        gr.Image(label="Price vs MA50 vs MA100"),
+        gr.Image(label="Price vs MA100 vs MA200"),
+        gr.Image(label="Original vs Predicted Price"),
+    ],
+    title="Stock Market Price Predictor",
+    description="Predicts stock prices using a pre-trained deep learning model."
+)
+
+interface.launch()
